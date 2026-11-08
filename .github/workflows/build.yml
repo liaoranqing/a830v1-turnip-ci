@@ -1,0 +1,100 @@
+name: Build Turnip for Adreno 830v1 (msm)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Patch variant"
+        type: choice
+        default: a830v1
+        options:
+          - a830v1
+          - a8xx-patched
+          - a8xx-gen8
+      mesa_tarball:
+        description: "Mesa tarball URL (default 26.2.3, required for a830v1)"
+        type: string
+        default: "https://archive.mesa3d.org/mesa-26.2.3.tar.xz"
+      build_version:
+        description: "Package version for the zip name/meta"
+        type: string
+        default: "0.1.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  MESA_TARBALL_SHA256: "1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl unzip zip patch python3 python3-pip \
+            meson ninja-build patchelf flex bison glslang-tools \
+            build-essential pkg-config xz-utils \
+            clang lld llvm
+          pip install --break-system-packages mako
+
+      - name: Cache Android NDK and libdrm deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            turnip_workdir/android-ndk-r29
+            turnip_workdir/deps
+            turnip_workdir/waydroid-vendor.zip
+            turnip_workdir/mesa-src.tar.xz
+          key: ndk-r29-linux-${{ runner.os }}-libdrm134-mesa2623
+
+      - name: Build Turnip
+        env:
+          INPUT_VARIANT: ${{ inputs.variant }}
+          INPUT_TARBALL: ${{ inputs.mesa_tarball }}
+          INPUT_VERSION: ${{ inputs.build_version }}
+        run: |
+          set -euo pipefail
+          export VARIANT="${INPUT_VARIANT:-a830v1}"
+          export BUILD_VERSION="${INPUT_VERSION:-0.1.0}"
+          case "$VARIANT" in
+            a830v1)
+              export MESA_TARBALL="${INPUT_TARBALL:-https://archive.mesa3d.org/mesa-26.2.3.tar.xz}"
+              export MESA_TARBALL_SHA256="${MESA_TARBALL_SHA256:-}"
+              ;;
+            *)
+              export MESA_TARBALL=""
+              ;;
+          esac
+          echo "variant=$VARIANT tarball=${MESA_TARBALL:-main} version=$BUILD_VERSION"
+          chmod +x build_turnip.sh
+          ./build_turnip.sh
+
+      - name: Verify output
+        run: |
+          set -euo pipefail
+          ls -lh turnip_workdir/Turnip_*.zip
+          unzip -l turnip_workdir/Turnip_*.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnip-a830v1-msm
+          path: turnip_workdir/Turnip_*.zip
+          if-no-files-found: error
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: turnip_workdir/Turnip_*.zip
+          generate_release_notes: true
