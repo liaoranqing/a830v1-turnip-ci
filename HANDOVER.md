@@ -545,6 +545,18 @@ journalctl -b -u waydroid-container -u waydroid-postboot
   下载 asset、校验解压、判读 `p0-verify.log`、补手册；也可用 MCP `issue_write` 直接完成
   P2 的 yzddmr6 issue（公开动作，需用户点头）。
 
+### 15.1 仓库已建、待推送（19:35）
+
+- 用户给出 URL `https://github.com/liaoranqing/a830v1-turnip-ci.git`。复核：
+  MCP `get_file_contents` = 409「Git Repository is empty」，`list_tags` / `list_releases` 为空，
+  gh-proxy 匿名 API 无 workflow run → **仓库已创建但尚未推送任何内容**。
+- `GIT_TERMINAL_PROMPT=0 git push -u origin main v0.1.0` 失败：
+  `could not read Username for 'https://gh-proxy.org'`，且无 `~/.git-credentials` /
+  `~/.config/git/credentials` / `~/.gitconfig` → 必须由用户在终端输入
+  GitHub 用户名 + PAT 完成一次推送。
+- **不要用 MCP `create_or_update_file` / `push_files` 代写文件**：远端会生成一个与本地
+  `62cb68e → b66d571` 无关的 root commit，反而导致后续 `git push` 非快进被拒。
+
 ## 12. 替代路线调研：Droidloom / Denial（2026-11-08）
 
 ### 12.1 硬件同款证据（用户提示 + 查证）
