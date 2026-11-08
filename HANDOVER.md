@@ -1204,3 +1204,60 @@ sudo apt-get install -y --allow-downgrades <工作区>/onepluspad-2pro-mainline/
 
 **装完并重启后仍需重跑 P0 验证**（`sys.boot_completed` 是否为 1），
 才能确认 netd 问题真正解决。本轮容器保持 STOPPED，未安装、未写启动槽。
+
+## 27. P0 收官：三项全绿，boot_completed=1（2026-11-08 22:26）
+
+### 27.1 重启后环境变化
+
+- 用户重启平板，`uname -r` = **`7.2.15-erhai-dev-g59273d8f058b-a326ab771`**（新内核生效）。
+- 10 个关键 netfilter `.ko` 均在 `/lib/modules/<new>/`，`modules.dep` 索引齐全，
+  `/proc/sys/kernel/modprobe=/sbin/modprobe`。
+- **本会话权限边界变了**：重启后 `id` = `uid=1000(liaoran)`、`sudo -n` 可用
+  （此前一直是隔离的 root + NoNewPrivs=1）。→ P0 验证可由本会话直接执行。
+- Waydroid 服务 `active` 但 LXC 容器 STOPPED、`is-enabled=disabled`（自启仍关闭）。
+
+### 27.2 脚本最后一处改进
+
+`p0-apply-verify.sh` 增加「宿主侧预加载 netfilter 模块」段（22 个模块：
+`ip_tables / iptable_{filter,mangle,nat,raw} / ip6_tables / ip6table_{filter,mangle,nat,raw} /
+nfnetlink_{log,queue} / nf_nat / nf_conntrack / x_tables / xt_*`），避免容器内
+`iptables-restore` 触发 `request_module` 失败导致 netd 再崩。实测加载 22 个相关模块。
+
+### 27.3 最终验证结果（`p0-verify.log` 22:26:51 轮）
+
+| 判据 | 结果 |
+|---|---|
+| `P0_RESULT_CONTAINER` | **UP**（LXC RUNNING，PID 8441） |
+| 属性 | `ro.hardware.vulkan=freedreno`、`egl=angle`、`debug.angle.backend=vulkan` |
+| [1] vkjson | 1465 字节完整 JSON |
+| [2] **GLES** | **`ANGLE (Vulkan 1.4.354 (Adreno (TM) 830v1 (0x44050001)), turnip Mesa driver-26.2.3)`** |
+| [3] **`sys.boot_completed`** | **1，仅等待 12 秒**（此前 240 秒都等不到） |
+| `P0_RESULT_SYSTEM_SERVER` | UP |
+| 容器收尾 | **STOPPED**、`systemctl is-active=inactive`、`is-enabled=disabled` |
+
+### 27.4 根因闭环（修复前 → 修复后）
+
+| 指标 | 修复前（§24） | 修复后 |
+|---|---|---|
+| `init.svc.netd` | `restarting` | **`running`**（进程 PID 73 存活） |
+| `sys.boot_completed` | 空 / 240s | **1 / 12s** |
+| `dev.bootcomplete` / `bootanim` | 空 / `running` | **1 / `stopped`**（`service.bootanim.exit=1`） |
+| `WATCHDOG KILLING SYSTEM PROCESS` | 2 次 | **0** |
+| `unable to initialize table` | 835 次 | **0** |
+| system_server PID | 234→1310→2351 反复重启 | **233 稳定** |
+| logcat | ANR / WAITED_HALF | `LOCKED_BOOT_COMPLETED`、`BOOT_COMPLETED_BROADCAST_COMPLETION_LATENCY_REPORTED`、GMS 正常启动、ANGLE Vulkan 1.4.354 |
+| SF 栈 | 主线程正常（图形死锁已由 Turnip 解开） | 同样正常空闲 |
+
+→ 两条独立问题都解决：**① CI 产物 Turnip 修好图形栈；② 重编内核补全 netfilter 修好 netd**。
+至此 Waydroid 在此设备上可完成启动并使用 Adreno 830v1 硬件加速。
+
+### 27.5 最终状态与收尾
+
+- 容器 **STOPPED**、自启关闭；`base.prop` 仍是 `egl=angle` + `debug.angle.backend=vulkan`；
+  overlay 驱动 md5 `393657de…a231`（新驱动）保持不变；未动启动槽（除 22:16 那次已授权的 deb 安装）。
+- 回退：删 overlay 驱动 / 恢复 `.bak-*`；内核回退
+  `sudo apt-get install -y --allow-downgrades erhai-kernel=0.7.2+g9d487b152f59.b8d403d2f`
+  （5 个旧内核 + `ubuntu.prev` 完好）。
+- 待办（可选）：删除 GitHub PAT；P2 给 yzddmr6 起草 830v1 + netfilter 配置的 issue；
+  按用户提议把内核编译流程固化成 GitHub Actions workflow（§25 的三条硬约束需先处理）。
+- 全部文档已同步两份手册与远端 `main`。
