@@ -1005,3 +1005,75 @@ sudo chmod 644 /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-diag/*
 - 自动把最近 15 分钟的 `/data/anr/anr_*` 复制到 `p0-diag/anr/` 便于离线分析。
 
 本轮**只读判读 + 改脚本**，容器保持 STOPPED，未改属性/内核/启动槽。
+
+## 24. 全量诊断：netd 崩溃的根因是内核 netfilter 配置不全（2026-11-08 20:56）
+
+用户执行 `sudo chmod 644 <工作区>/p0-diag/*` 后，全量日志可读，因果链完全闭合。
+
+### 24.1 netd 崩溃证据
+
+- `getprop.txt`：`[init.svc.netd]: [restarting]`、
+  `[init.svc_debug_pid.netd]: [2770]`；`ps.txt` 的 54 个进程里**没有 netd**。
+- `logcat.txt` 里 `netdClient: Skipping libnetd_client init since *we* are netd`
+  每 **5 秒**出现一次，PID `73 → 373 → 420 → … → 2770`（49 轮），
+  即 netd 起来后立刻退出、init 反复重启。
+- 每轮启动都刷 `iptables-restore / ip6tables-restore process … terminated status=512`，
+  错误统计：`unable to initialize table 'filter'` **486 次**、`'raw'` **178 次**、
+  `'mangle'` **171 次**（共 21648 条 netd/iptables 相关行）。
+- 退出前最后几条：
+  ```
+  E Netd: Unable to create netlink socket for family 5: Protocol not supported
+  W Netd: Unable to open qlog quota socket, check if xt_quota2 can send via UeventHandler
+  E Netd: Unable to create netlink socket for family 12: Protocol not supported
+  E Netd: Unable to open strict socket
+  E Netd: Unable to create NFLogListener: Status[code: 93, "[Protocol not supported]"]
+  ```
+
+### 24.2 内核缺件清单（erhai 7.2.15，`/proc/config.gz` + `/lib/modules`）
+
+| 类别 | 状态 |
+|---|---|
+| 已加载 | `ip_tables / iptable_filter / iptable_nat / iptable_mangle / nf_nat / nf_conntrack / xt_MASQUERADE / xt_tcpudp / xt_CHECKSUM / xt_mark / nf_defrag_ipv4,ipv6` |
+| **已编译但未加载** | `ip6_tables.ko`、`ip6table_filter.ko`、`ip6table_mangle.ko`（`CONFIG_IP6_NF_IPTABLES/FILTER/MANGLE=m`） |
+| **根本没编** | `CONFIG_IP_NF_RAW`、`CONFIG_IP6_NF_RAW`、`CONFIG_IP6_NF_NAT`（`is not set`）→ 对应 `raw` 表 178 次失败 |
+| **根本没编** | `CONFIG_NETFILTER_NETLINK_LOG / QUEUE / ACCT`、`CONFIG_NETFILTER_XT_TARGET_NFLOG / NFQUEUE / CONNMARK / IDLETIMER / MARK / TPROXY`、`CONFIG_NETFILTER_XT_MATCH_OWNER / QUOTA / STATISTIC / STRING / COMMENT / LIMIT / MULTIPORT / PKTTYPE / PHYSDEV / U32 / SOCKET / CONNMARK / MARK`、`CONFIG_NF_LOG_IPV4`（均 `is not set`）→ 对应 NFLogListener / qlog 报错 |
+
+→ 手册 §1 说的「legacy iptables/NAT」只覆盖了**宿主 `waydroid-net.sh` 用到的最小集**
+（IPv4 filter/nat/mangle + MASQUERADE），没覆盖 **Android 13 netd 需要的全套表与 xt 模块**。
+
+### 24.3 完整因果链
+
+```
+内核缺 raw 表 + IPv6 表未加载 + 缺 NFLOG/xt_*
+  → netd 启动初始化 iptables 规则失败、每 5 秒崩溃重启（init.svc.netd=restarting）
+  → NetworkManagementService.connectNativeNetdService() 等不到 netd 的 binder 服务
+  → system_server 主线程阻塞 60s → Watchdog KILLING SYSTEM PROCESS（§23）
+  → system_server 重启（234→1310→2351）、bootanim 一直 running
+  → sys.boot_completed 永远不置位
+```
+**整个链条与 Turnip / ANGLE / msm DRM / 830v1 补丁无关**，且是实验前既有问题（§2.2）。
+
+### 24.4 修复路径（尚未执行，需用户决策）
+
+- **轻量、零风险、可回退**：`sudo modprobe ip6_tables ip6table_filter ip6table_mangle`
+  可消除 IPv6 filter/mangle 的 657 次报错；但 `raw` 表与 `NETFILTER_NETLINK_LOG`
+  仍未编入，netd 大概率仍会退出 → **单独做不够**。
+- **根治**：重编 erhai 内核，`JOBS=6`，在 defconfig 打开 §24.2 表中「根本没编」的所有项
+  （至少 `CONFIG_IP_NF_RAW=m`、`CONFIG_IP6_NF_RAW=m`、`CONFIG_IP6_NF_NAT=m`、
+  `CONFIG_NETFILTER_NETLINK_LOG=m`、`CONFIG_NETFILTER_XT_TARGET_NFLOG=m`、
+  `CONFIG_NETFILTER_XT_MATCH_OWNER/QUOTA/…=m`、`CONFIG_NF_LOG_IPV4=m`），
+  重新打包并写启动槽。**按工作约定，重编内核 / 写启动槽必须先征得用户明确同意**，
+  且保持现有 4 个旧内核可回退。
+- **不修内核的替代**：把 `boot_completed` 记为既有内核缺件，P0 以「图形栈验证通过」
+  收官，转入 P2 起草给 yzddmr6 的 issue。
+
+### 24.5 P0 结论（重要）
+
+P0 的目标是验证 CI 产物能否让图形栈走通，**已达成**：容器 UP、vkjson 正常、
+`dumpsys SurfaceFlinger` 的 GLES 明确显示
+`Vulkan 1.4.354 (Adreno (TM) 830v1 (0x44050001)), turnip Mesa driver-26.2.3`、
+SF/RenderEngine 栈正常空闲（原死锁解开）。
+`sys.boot_completed=0` 是**独立的、实验前就存在的内核 netfilter 缺件**，
+不应据此否定 CI 产物。
+
+本轮**只读分析**，容器保持 STOPPED，未改属性/内核/启动槽、未 modprobe。
