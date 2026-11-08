@@ -566,6 +566,22 @@ journalctl -b -u waydroid-container -u waydroid-postboot
 - `git push` 提示密码时粘贴 `ghp_…`（终端不回显任何字符属正常）；不要用 sudo 跑 git；
   成功后可在 Developer settings 删除该一次性 token。
 
+## 16. 推送完成与 CI 启动（2026-11-08 19:47）
+
+- 用户在对话中直接贴出了 PAT（**已提醒立即删除**；本文不记录 token，也未写入任何配置/日志）。
+- 一次性推送结果：`gh-proxy.org` 带认证 push 失败（`remote: No anonymous write access`），
+  **直连 `https://github.com/...` 成功**（关沙盒后直连可用）→ `main` + `v0.1.0` 已推送。
+- 核验：`.git/config` **不含 token**；remote 已改为干净直连
+  `https://github.com/liaoranqing/a830v1-turnip-ci.git`。
+- **首次把 workflow 与 tag 一起推送时 GitHub 未触发 Actions**（`actions/runs` = 0）；
+  补推第二个 tag `v0.1.1` 后触发成功：run **`42477292896`**，
+  `Build Turnip for Adreno 830v1 (msm)`，status `in_progress`（2026-11-08 11:47:38Z）。
+- `Publish release (tags only)` 会为 `v0.1.1` 发布 Release asset（public，可匿名下载）。
+- 已启动后台监控：轮询 `v0.1.1` Release，产物 `Turnip_A830v1-msm_V*.zip` 落地后自动下载到
+  工作区根；若 CI 失败则记录结论。用户下次回来可让我读日志 / 排查。
+- 待用户：立刻在 Developer settings **删除该 PAT**（已泄露，CI 用 `GITHUB_TOKEN`，删除无影响）；
+  产物落地后跑 `sudo bash <工作区>/p0-apply-verify.sh`（输 sudo 密码 + 按一次 `y`）。
+
 ## 12. 替代路线调研：Droidloom / Denial（2026-11-08）
 
 ### 12.1 硬件同款证据（用户提示 + 查证）
