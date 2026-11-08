@@ -20,7 +20,7 @@ log() { echo -e "${green}$*${nocolor}"; }
 die() { echo -e "${red}$*${nocolor}" >&2; exit 1; }
 
 check_deps() {
-    local deps="git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3 patch"
+    local deps="git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3 patch debugfs"
     for dep in $deps; do
         command -v "$dep" >/dev/null 2>&1 || die "Falta a dependência: $dep"
     done
@@ -390,7 +390,14 @@ prepare_android_libdrm() {
         curl -sL --retry 5 -o "$vzip" "https://sourceforge.net/projects/waydroid/files/images/vendor/waydroid_arm64_only/lineage-20.0-20261022-MAINLINE-waydroid_arm64_only-vendor.zip"
         [ "$(sha256sum "$vzip" | cut -d' ' -f1)" = "$vsha" ] || die "libdrm: vendor image checksum mismatch"
     fi
-    unzip -o -j "$vzip" "lib64/libdrm.so" -d "$deps/lib" >/dev/null
+    # The vendor zip holds one raw ext4 vendor.img, not an extracted file tree.
+    # Pull the bionic /lib64/libdrm.so out of that image with debugfs.
+    unzip -o -j "$vzip" "vendor.img" -d "$WORKDIR" >/dev/null
+    [ -s "$WORKDIR/vendor.img" ] || die "libdrm: vendor.img not extracted from zip"
+    debugfs -R "dump /lib64/libdrm.so $deps/lib/libdrm.so" "$WORKDIR/vendor.img" >/dev/null 2>&1 \
+        || die "libdrm: debugfs dump failed for /lib64/libdrm.so"
+    [ -s "$deps/lib/libdrm.so" ] || die "libdrm: extracted libdrm.so is empty"
+    rm -f "$WORKDIR/vendor.img"
     rm -rf "$WORKDIR/drm-src"
     git clone -q --depth=1 https://gitlab.freedesktop.org/mesa/drm.git "$WORKDIR/drm-src"
     mkdir -p "$deps/include/drm"
