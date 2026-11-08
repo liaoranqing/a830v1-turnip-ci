@@ -796,3 +796,77 @@ sudo bash /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-apply-verify.sh
   Developer settings 删除**；本地 `.git/config` 已复核不含凭据。
 - 回退：删除 overlay 驱动或恢复 `.bak-*` 即可，无持久改动。
 - 本轮仍未启动容器、未改 `base.prop`、未动内核/启动槽、未开自启。
+
+## 21. 首次 P0 执行：结论无效（容器未启动）与脚本修复（2026-11-08 20:29）
+
+### 21.1 日志判读（`p0-verify.log`，20:26:35 执行）
+
+- 用户执行 `sudo bash p0-apply-verify.sh` 并按 `y`。状态确认：
+  新驱动已装 overlay（md5 `393657de…a231`）、备份
+  `vulkan.freedreno.so.bak-20261108-202638`、容器最终 **STOPPED**、
+  `base.prop` 仍 `egl=angle` + `debug.angle.backend=vulkan`（未改动）。
+- 但**容器根本没起来**：`lxc-info` 打印 `State: STOPPED`；`lxc-attach` 报
+  `Connection refused - Failed to get init pid`；三个图形属性全空；
+  `sys.boot_completed` 空 120 秒；`surfaceflinger 未运行`。
+- → `P0_RESULT_BOOT=0 / GLES=EMPTY / VKJSON_BYTES=221` 是「容器不存在」的空结果，
+  **不能据此判断驱动好坏**。这一轮不构成对 CI 产物的有效验证。
+
+### 21.2 根因：P0 脚本漏了 session start（我的脚本 bug）
+
+- `waydroid-container.service` 的 `ExecStart=/usr/bin/waydroid container start`
+  只是 DBus 守护进程（`BusName=id.waydro.Container`），**不会 lxc-start**。
+- 源码证据：`/usr/lib/waydroid/tools/actions/session_manager.py:98`
+  `tools.helpers.ipc.DBusContainerService().Start(session)` → 容器服务
+  `container_manager.py:35 do_start()` → `:218 helpers.lxc.start(args)`。
+  **只有 `waydroid session start` 才会真正拉起 LXC 容器**。
+- 手册 §5 的已验证流程本来就写着第二步：
+  `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus waydroid session start &`
+  —— 我写 P0 脚本时漏了这一行，只做了 `systemctl restart`，导致
+  `Failed to get init pid`。**与驱动、补丁、内核均无关。**
+- `session_manager.py:62` 明确警告「XDG_RUNTIME_DIR is not set;
+  please don't start a Waydroid session with 'sudo'!」→ 必须显式给
+  用户级 session bus / XDG_RUNTIME_DIR / Wayland socket。
+- `config/__init__.py:57-72`：`user_id=os.getuid()`、`pid=os.getpid()`、
+  `waydroid_data=$XDG_DATA_HOME/waydroid/data`；`container_manager.py:30`
+  允许 uid `0` 或 `session["user_id"]`，`:33` 对 uid 0 跳过 pid 校验
+  → root 方式也被源码支持，只要 HOME/XDG_DATA_HOME 指向 liaoran，
+  路径就不会漂移到 `/root`。
+
+### 21.3 脚本修复（`p0-apply-verify.sh`，`bash -n` 通过）
+
+1. 新增会话定义：`SESSION_USER=liaoran`、`XDG_RUNTIME_DIR=/run/user/1000`、
+   `WAYLAND_DISPLAY=wayland-0`、`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`、
+   `HOME=/home/liaoran`、`XDG_DATA_HOME=/home/liaoran/.local/share`。
+2. **自适应两种启动方式**：优先 `runuser -u liaoran`（手册已验证路径），
+   若 `runuser` 不可用/受限则回退 root 方式（源码白名单允许 uid 0）。
+   日志会打印 `session 模式：desktop-user|root-fallback`。
+3. 顺序修正：清残留 session 放在 `systemctl restart` **之前**——否则
+   session 不存在时 `stop()` 会退化成 `DBusContainerService.Stop(True)`，
+   可能把刚重启的容器服务一起停掉。
+4. 新增 `P0_RESULT_CONTAINER=UP|DOWN`：容器没起来就打印 session 完整日志并
+   `exit 1` 跳过三项验证，**不再产生误导性的空结果**。
+5. cleanup 强化：先以正确身份 `waydroid session stop`，再
+   `systemctl stop`；若 `lxc-info` 仍显示 RUNNING 则 `lxc-stop -k` 强制兜底，
+   并打印**最终容器状态**供核验。`session` 日志单独落 `p0-session.log`。
+6. 等待容器 RUNNING 最长 60 秒（每 10 秒打印进度），boot 等待仍 120 秒。
+
+### 21.4 待用户：重跑一次（重启前脚本仍会要求输入 `y`）
+
+```bash
+sudo bash /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-apply-verify.sh
+```
+
+驱动已在 overlay，重跑是幂等的（会再生成一个 `.bak-*` 备份，无害）。
+判读顺序：**先看 `P0_RESULT_CONTAINER` 是否 UP**，再看
+`P0_RESULT_BOOT / GLES / VKJSON_BYTES`。若容器仍 DOWN，按 `p0-session.log`
+里的报错定位（多半是 DBus session bus 或 Wayland socket 权限）；
+若容器 UP 但 boot 仍 0，才是真正的图形栈问题，转入 §6-P1。
+
+### 21.5 环境边界补充
+
+- 本会话 `runuser -u liaoran -- id` 报「无法设置 组: 不允许的操作」
+  （namespace 隔离），但这只影响本会话，用户在平板终端以真实 root 运行时
+  `runuser` 正常；脚本已做回退，两种环境都能工作。
+- 本轮**只读诊断 + 改脚本**，未启动容器、未改属性/内核/启动槽；
+  容器保持 STOPPED。
