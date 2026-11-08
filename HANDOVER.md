@@ -582,6 +582,26 @@ journalctl -b -u waydroid-container -u waydroid-postboot
 - 待用户：立刻在 Developer settings **删除该 PAT**（已泄露，CI 用 `GITHUB_TOKEN`，删除无影响）；
   产物落地后跑 `sudo bash <工作区>/p0-apply-verify.sh`（输 sudo 密码 + 按一次 `y`）。
 
+## 17. 首次 CI 失败定位与修复（2026-11-08 19:57）
+
+- 用户收到 GitHub 失败邮件 → 核实无误：run `42477292896`（tag `v0.1.1`）
+  `completed/failure`，仅 52 秒，失败步骤 `Build Turnip`。
+- 日志（`.workbuddy/research/ci-failure.log`，27 KB）：
+  `Baixando Android NDK r29...` → `Baixando Mesa mesa-26.2.3.tar.xz...` →
+  `tar: stdout: write error` → exit 2。**SHA256 校验已通过**（未报 checksum mismatch），
+  不是下载 / 网络 / 校验问题。
+- 根因：`build_turnip.sh:49` 的 `top="$(tar tJf "$tb" | head -1 | cut -d/ -f1)"`，
+  在脚本第 2 行 `set -euo pipefail` 下被 `head -1` 提前关闭管道，GNU tar 收到
+  SIGPIPE/EPIPE（Mesa tarball 上万条目）→ 命令替换失败、脚本退出。
+- 修复：改为 `tar tJf "$tb" | awk 'NR==1 { split($0,p,"/"); print p[1] }'`（awk 读完整列表、
+  只输出第一行第一段，不提前关闭管道），并加 `[ -n "$top" ] || die ...` 兜底；`bash -n` 通过。
+- 推送：直连 `github.com` 间歇性 `GnuTLS recv error (-110)` / `CONNECT tunnel failed 502`，
+  用 `-c http.version=HTTP/1.1` 重试第 3 次成功 → `main` = `9554e3f`、新 tag `v0.1.2`。
+- 新一轮 CI：**run `42477998670`**（tag `v0.1.2`，`in_progress`，11:57:30Z）。
+  已挂后台监控，Release asset 出现后自动下载到工作区根。
+- §6 所列「首次 CI 三大风险」（补丁不适用 / libdrm / meson 选项）尚未走到；
+  下一关若失败需继续按日志定位。
+
 ## 12. 替代路线调研：Droidloom / Denial（2026-11-08）
 
 ### 12.1 硬件同款证据（用户提示 + 查证）
