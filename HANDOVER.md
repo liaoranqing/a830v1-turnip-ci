@@ -734,3 +734,65 @@ journalctl -b -u waydroid-container -u waydroid-postboot
 - 产物落地后仍需用户在平板终端执行
   `sudo bash <工作区>/p0-apply-verify.sh`（重启前脚本会再确认一次）；
   本会话仍未启动容器、未改属性/内核/启动槽。
+
+## 20. 第四轮 CI 成功：P0 产物已就绪（2026-11-08 20:21）
+
+### 20.1 CI 结果
+
+- run **`42479527201`**（tag `v0.1.4`）`completed/success`，12:17:20Z → 12:21:08Z
+  （3 分 48 秒；比预估 40–70 分钟快，因 runner 下载/编译极快）。
+  **8 个步骤全部 success**：Install deps / Cache / Build Turnip / Verify output /
+  Upload artifact / Publish release / Post / Complete。
+- Release `v0.1.4`（12:20:56Z）asset：
+  `Turnip_A830v1-msm_V0.1.0_a75430f920ef.zip`（2,642,841 B）。
+  后台监控已自动下载到工作区根，经 gh-proxy 与直连两路容错（首次 403/504 后成功）。
+
+### 20.2 产物校验（全部通过）
+
+| 项 | 值 |
+|---|---|
+| zip SHA256 | `8d0b45a437306915acc6fdde4c224671849c64c6ffc3f9aeee3b4ef5961a7780` |
+| zip 内容 | `libvulkan_freedreno.so` 14,319,464 B + `meta.json` 354 B；`unzip -t` 无错 |
+| meta | `Mesa 26.2.3 + erhai fixes — Mesa a75430f920ef`、`minApi 28`、author `StevenMXZ` |
+| 新驱动 md5 | `393657de9ed3c30d0acff29ce567a231`（旧 overlay `860bc353…`，确认不同） |
+| 版本串 | `Mesa 26.2.3 (git-a75430f920)` |
+| **830v1 证据** | strings 含 **`Adreno (TM) 830v1`**（旧镜像驱动无此串）；另有 829 / 830 / 810 |
+| **ABI 兼容** | NEEDED 仅 `libhardware/liblog/libnativewindow/libsync/libm/libz/libdrm/libdl/libc`；版本需求只有 `LIBC/LIBC_N/LIBC_P/LIBC_R`，**无 `LIBC_36`** → 可被 LineageOS 20 / API 33 加载（§13.3 的 Droidloom 不兼容问题不存在） |
+| 注意 | RPATH 残留 CI runner 绝对路径 `$ORIGIN/../../android_stub:/home/runner/work/.../deps/lib`；设备侧靠 `$ORIGIN` 与 vendor 默认搜索路径找 `libdrm.so`（Waydroid vendor 镜像内有），若加载报缺库优先查此项 |
+
+### 20.3 P0 脚本打磨（工作区 `p0-apply-verify.sh`）
+
+- 容器内命令（`vkjson` / `dumpsys` / `logcat` / `debuggerd`）**一律先落盘再截取**，
+  避免 `set -o pipefail` 下 `head` 提前关闭管道触发 SIGPIPE（§17 同款坑）。
+- 新增：容器内 `ro.hardware.vulkan/egl`、`debug.angle.backend` 属性回显；
+  vkjson 关键字段摘录；Watchdog/RenderEngine 日志线索；boot 等待进度（每 30 秒）。
+- 新增结构化判读行 `P0_RESULT_BOOT=`、`P0_RESULT_GLES=`、`P0_RESULT_VKJSON_BYTES=`，
+  以及末段判读摘要（新驱动 md5、备份路径、一键回退命令）。`bash -n` 通过。
+- 不变：自动备份 `vulkan.freedreno.so.bak-<时间戳>`、不改 `base.prop`、
+  不开自启、`trap cleanup EXIT` **无条件立即停容器**；重启前仍需输入 `y`。
+
+### 20.4 权限边界复核（用户关闭沙盒后仍如此）
+
+`uid=0` 但 `NoNewPrivs=1` → `sudo -n true` 失败；`systemctl` 报
+`Failed to connect to system scope bus: Operation not permitted`；
+overlay 目录写入 `EACCES`；`lxc-info` 可直接读 → **State: STOPPED**。
+→ 安装驱动与重启容器**必须由用户在平板终端执行**（输 sudo 密码即用户所说的「登录账号」）。
+
+### 20.5 用户唯一待执行（P0）
+
+```bash
+sudo bash /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-apply-verify.sh
+```
+
+脚本自动定位工作区里的 `Turnip_A830v1-msm_V*.zip`；输 `y` 后备份旧驱动、
+装新驱动、重启容器、跑三项验证 + SF 栈，然后立即停容器，日志写到
+`p0-verify.log`。我接手读 `P0_RESULT_*` 判读：三项全绿则 P0 完成；
+若 `BOOT=0` 或 GLES 为空，按 §6-P1 定位（社区 main 变体 / 降分辨率 / 仅 Vulkan），
+并把新发现补进手册。
+
+### 20.6 收尾提醒
+
+- GitHub PAT（`ghp_…`）已出现在对话里，**P0 验证完成后请立即在
+  Developer settings 删除**；本地 `.git/config` 已复核不含凭据。
+- 回退：删除 overlay 驱动或恢复 `.bak-*` 即可，无持久改动。
+- 本轮仍未启动容器、未改 `base.prop`、未动内核/启动槽、未开自启。
