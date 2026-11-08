@@ -45,7 +45,10 @@ jobs:
             meson ninja-build patchelf flex bison glslang-tools \
             build-essential pkg-config xz-utils e2fsprogs \
             clang lld llvm
-          pip install --break-system-packages mako
+          # Mesa 26.2.3 declares meson_version '>= 1.4.0'; Ubuntu 24.04 apt ships 1.3.2.
+          # Pin 1.9.1: verified locally against Mesa 26.2.3 default_options + our -D set.
+          pip install --break-system-packages "meson==1.9.1" mako
+          python3 -m mesonbuild.mesonmain --version
 
       - name: Cache Android NDK and libdrm deps
         uses: actions/cache@v4

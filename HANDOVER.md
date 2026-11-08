@@ -602,6 +602,27 @@ journalctl -b -u waydroid-container -u waydroid-postboot
 - §6 所列「首次 CI 三大风险」（补丁不适用 / libdrm / meson 选项）尚未走到；
   下一关若失败需继续按日志定位。
 
+## 18. 第二轮失败与第三轮（2026-11-08 20:0x）
+
+- run `42477998670`（tag `v0.1.2`）`completed/failure`，63 秒，仍失败在 `Build Turnip`。
+- **好消息**：日志确认 6 个补丁全部成功应用 —— `0001-freedreno-a830v1`、
+  `turnip-a8xx-runtime-unroll`、`turnip-gen8-tex-line-offset`（already present）、
+  `turnip-ssbo-wide-reads`，以及 **Droidloom `0016` / `0018`** →
+  §13.5 的适用性判断在真实 CI 上得到验证。
+- 失败点：`libdrm: pulling bionic libdrm.so ...` →
+  `caution: filename not matched: lib64/libdrm.so`（unzip 退出码 11）。
+- 根因：本地下载该 SourceForge zip（77,356,908 B，SHA `b634f637…` 与脚本写死值一致），
+  `unzip -l` 显示**包内只有一个 `vendor.img`（235,610,112 B，raw ext4）**，
+  没有展开的 `lib64/libdrm.so` → 原脚本第 393 行假设错误。
+- 修复：`unzip` 提取 `vendor.img` → `debugfs -R "dump /lib64/libdrm.so …" vendor.img` →
+  校验非空 → 删除 235 MB 临时镜像；`debugfs` 加入 `check_deps`，workflow 的 apt 依赖
+  加 `e2fsprogs`。`bash -n` 通过。
+- **提前排除 §6 的 meson 风险**：Mesa 26.2.3 的 `meson.options`（113 个 option）中
+  `platforms / video-codecs / platform-sdk-version / android-stub / gallium-drivers /
+  vulkan-drivers / vulkan-beta / freedreno-kmds / egl / android-libbacktrace` **全部存在**。
+- 第三轮：run **`42478349538`**（tag `v0.1.3`，`in_progress`）；已挂后台监控，
+  Release asset 出现后自动下载到工作区根。
+
 ## 12. 替代路线调研：Droidloom / Denial（2026-11-08）
 
 ### 12.1 硬件同款证据（用户提示 + 查证）

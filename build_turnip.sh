@@ -25,6 +25,35 @@ check_deps() {
         command -v "$dep" >/dev/null 2>&1 || die "Falta a dependência: $dep"
     done
     pip install mako --break-system-packages >/dev/null 2>&1 || true
+
+    # Mesa 26.2.3 declares meson_version '>= 1.4.0', but Ubuntu 24.04's apt
+    # package is 1.3.2. Pull a pinned, locally verified version from pip and
+    # always invoke it as a Python module so PATH ordering cannot pick the old
+    # /usr/bin/meson. Verified: 1.9.1 accepts Mesa 26.2.3's default_options
+    # (incl. rust_std / build.rust_std) and our full -D switch set.
+    local meson_state
+    meson_state="$(python3 - <<'PY'
+import importlib.metadata as md
+try:
+    v = md.version('meson')
+except Exception:
+    v = '0.0.0'
+try:
+    major, minor = [int(x) for x in v.split('.')[:2]]
+except Exception:
+    major, minor = 0, 0
+print('ok' if (major, minor) >= (1, 4) else 'old')
+PY
+)"
+    if [ "$meson_state" != ok ]; then
+        log "Meson too old for Mesa 26.2.3; installing meson==1.9.1 via pip"
+        python3 -m pip install --break-system-packages --upgrade 'meson==1.9.1' \
+            || pip install --break-system-packages --upgrade 'meson==1.9.1' \
+            || die "Falha ao instalar meson==1.9.1"
+    fi
+    python3 -m mesonbuild.mesonmain --version >/dev/null 2>&1 \
+        || die "meson>=1.4.0 indisponível via python3"
+    log "Meson: $(python3 -m mesonbuild.mesonmain --version)"
 }
 
 prepare_workdir() {
@@ -474,7 +503,7 @@ EOF
     local output_dir="/tmp/turnip-$VARIANT"
     rm -rf "$build_dir" "$output_dir"
 
-    meson setup "$build_dir"         --cross-file android-aarch64.txt         --native-file native.txt         --prefix "$output_dir"         -Dbuildtype=release         -Dstrip=true         -Dplatforms=android         -Dvideo-codecs=         -Dplatform-sdk-version=36         -Dandroid-stub=true         -Dgallium-drivers=         -Dvulkan-drivers=freedreno         -Dvulkan-beta=true         -Dfreedreno-kmds=msm         -Degl=disabled         -Dandroid-libbacktrace=disabled
+    python3 -m mesonbuild.mesonmain setup "$build_dir"         --cross-file android-aarch64.txt         --native-file native.txt         --prefix "$output_dir"         -Dbuildtype=release         -Dstrip=true         -Dplatforms=android         -Dvideo-codecs=         -Dplatform-sdk-version=36         -Dandroid-stub=true         -Dgallium-drivers=         -Dvulkan-drivers=freedreno         -Dvulkan-beta=true         -Dfreedreno-kmds=msm         -Degl=disabled         -Dandroid-libbacktrace=disabled
 
     ninja -C "$build_dir" install
 
