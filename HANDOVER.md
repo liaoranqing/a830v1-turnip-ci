@@ -870,3 +870,63 @@ sudo bash /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-apply-verify.sh
   `runuser` 正常；脚本已做回退，两种环境都能工作。
 - 本轮**只读诊断 + 改脚本**，未启动容器、未改属性/内核/启动槽；
   容器保持 STOPPED。
+
+## 22. 第二次 P0：图形栈已打通，仅剩 boot_completed（2026-11-08 20:38）
+
+### 22.1 结果（`p0-verify.log` 20:36:19 那轮）
+
+| 判据 | 结果 |
+|---|---|
+| `P0_RESULT_CONTAINER` | **UP**（`lxc-info` RUNNING，PID 170922，`session 模式：desktop-user`） |
+| 容器内属性 | `ro.hardware.vulkan=freedreno`、`ro.hardware.egl=angle`、`debug.angle.backend=vulkan` |
+| [1] vkjson | 1465 字节、完整 JSON（instance 扩展列表齐全；`devices:[{}]` 为空对象是 Android 13 已弃用 vkjson 的行为，不影响判读）；不再是首轮的 221 字节报错 |
+| [2] **GLES** | **`GLES: Google Inc. (Qualcomm), ANGLE (Qualcomm, Vulkan 1.4.354 (Adreno (TM) 830v1 (0x44050001)), turnip Mesa driver-26.2.3), OpenGL ES 3.1.0`** |
+| [3] `sys.boot_completed` | **0 / 空**（等满 120 秒） |
+| 收尾 | 容器 STOPPED、未开自启、`base.prop` 未改；新增备份 `.bak-20261108-203621` |
+
+### 22.2 决定性结论：原死锁点已解开
+
+- GLES 行**从「取不到」变成「取到」**，且明确写出 `Adreno (TM) 830v1 (0x44050001)`
+  与 `turnip Mesa driver-26.2.3` → CI 产物的 830v1 ID 补丁、mesa 26.2.3、
+  erhai + Droidloom `0016`/`0018` 修复**全部生效**，ANGLE 通过 Vulkan 拿到了硬件设备。
+- `debuggerd -b` 的 SF 栈：主线程 `surfaceflinger` 停在
+  `MessageQueue::waitMessage() → Looper::pollInner(epoll_pwait)`（正常空闲），
+  `RenderEngine` 线程停在 `futex_wait_ex / pthread_cond_wait`（空闲等活），
+  binder 线程正常 `talkWithDriver`。
+  **不再是 §2.2 记录的 `Output::composeSurfaces → RenderEngineResult` 死锁**，
+  也不是 mesa 软渲染 600% CPU 的情形。
+- → P0 的核心目标（验证 CI 产物能否让图形栈走通）**已经达成**；
+  `sys.boot_completed` 属于 Android 启动完整性，可能是独立的后置问题。
+
+### 22.3 剩余问题与假设
+
+`boot_completed` 未置位，日志里 `Watchdog/RenderEngine` 关键字无匹配
+（但当时只取 `logcat -d -t 300` 的最后 300 行，不足以排除）。候选原因：
+1. **首次启动慢**：GAPPS 首次 dex 优化 / PackageManager 扫描，120 秒不够；
+2. `system_server` 仍被 Watchdog 重启（需全量 logcat 确认）；
+3. 某个非图形系统服务卡住（需 `getprop` / `dumpsys activity` / `ps` 确认）。
+
+### 22.4 诊断增强（`p0-apply-verify.sh`，`bash -n` 通过）
+
+- `BOOT_WAIT_SECS` 默认 **240 秒**（可用 `sudo env BOOT_WAIT_SECS=300 bash …` 覆盖），
+  每 30 秒打印 `dev.bootcomplete` / `init.svc.bootanim` / `system_server pid`。
+- 全量诊断落盘到工作区 `p0-diag/`：`getprop.txt`、`logcat.txt`（全量，不再只 300 行）、
+  `ps.txt`、`activity.txt`、`surfaceflinger.txt`、`vkjson.txt`、`sf-stack.txt`。
+- 新增结构化结果：`P0_RESULT_BOOT_WAIT_SECS`、`P0_RESULT_SYSTEM_SERVER`、
+  `P0_RESULT_WATCHDOG_HITS`、`P0_RESULT_LOGCAT_BYTES`、`P0_DIAG_DIR`；
+  logcat 关键行扩大到 `system_server / PackageManager / ActivityManager /
+  bootcomplete / FATAL / ANR / zygote` 等。
+- 收尾约定不变：无条件停容器 + `lxc-stop -k` 兜底 + 打印最终状态；
+  不改 `base.prop`、不开自启。ANGLE 下 SF 现已正常空闲，延长观察窗口不会
+  重现 600% CPU 的软件渲染负载。
+
+### 22.5 待用户：再跑一次（约 4–6 分钟，脚本每 30 秒有进度输出）
+
+```bash
+sudo bash /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-apply-verify.sh
+```
+
+若 `P0_RESULT_BOOT=1` → **P0 全部完成**；若仍 0，我读 `p0-diag/` 的全量
+logcat / getprop / ps 定位是启动慢还是 system_server 重启，再按 §6-P1 处理。
+
+本轮**只读判读 + 改脚本**，容器保持 STOPPED，未改属性/内核/启动槽。
