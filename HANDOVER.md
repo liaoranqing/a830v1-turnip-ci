@@ -557,6 +557,15 @@ journalctl -b -u waydroid-container -u waydroid-postboot
 - **不要用 MCP `create_or_update_file` / `push_files` 代写文件**：远端会生成一个与本地
   `62cb68e → b66d571` 无关的 root commit，反而导致后续 `git push` 非快进被拒。
 
+### 15.2 PAT 推送要点（用户需指导，19:41）
+
+- 用户表示不会生成 PAT（原文「pctoken」）→ 需给出 classic PAT 逐步教程。
+- 推送含 `.github/workflows/build.yml` 的提交时，classic PAT **必须同时勾 `repo` 与
+  `workflow`**；缺 `workflow` 会被 GitHub 拒绝（"refusing to allow a Personal Access Token
+  to create or update workflow ... without `workflow` scope"）。
+- `git push` 提示密码时粘贴 `ghp_…`（终端不回显任何字符属正常）；不要用 sudo 跑 git；
+  成功后可在 Developer settings 删除该一次性 token。
+
 ## 12. 替代路线调研：Droidloom / Denial（2026-11-08）
 
 ### 12.1 硬件同款证据（用户提示 + 查证）
