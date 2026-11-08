@@ -1077,3 +1077,73 @@ SF/RenderEngine 栈正常空闲（原死锁解开）。
 不应据此否定 CI 产物。
 
 本轮**只读分析**，容器保持 STOPPED，未改属性/内核/启动槽、未 modprobe。
+
+## 25. 重编内核方案（用户已选路线，脚本待确认后执行）（2026-11-08 21:0x）
+
+### 25.1 决策与前提
+
+- 用户通过选项明确选择 **「重编内核补全 netfilter」**。按约定，实际编译与
+  写启动槽仍需一次明确确认；本轮只做只读侦察 + 生成清单/脚本，**未编译**。
+- 构建仓库 `onepluspad-2pro-mainline` v0.7.1 已克隆到
+  `<工作区>/onepluspad-2pro-mainline`（手册 §1 记录的 `~/onepluspad-2pro-mainline`
+  已被清理，家目录只剩另一个 `onepluspad-2pro-linux-deploy` 部署仓库）。
+- `kernel/source.json` pin 内核 commit `e4f82a321af566367ded2e3540a550122a5e9717`
+  （基线 v7.2.15）；交叉编译器 `aarch64-linux-gnu-gcc` 与 `ccache` 均可用；
+  `packaging/boot-reference/stock-boot-inputs.tar.gz`（37 MB）随仓库自带，
+  `prepare-inputs.py` 默认不下载大 ISO → 重建输入成本低。
+- `tools/build-kernel.sh` 的 `fragments=(...)` 只有两个源码树内 fragment；
+  第 77-87 行会**逐行校验** fragment 里每个 `CONFIG_*=y|m` 都出现在最终 `.config`，
+  所以配置片段的选项名必须用 Kconfig 核对过。
+
+### 25.2 已核对的配置清单（`<工作区>/netfilter-waydroid.config`）
+
+54 个 `CONFIG_*=m`，逐项用 pinned commit 的
+`net/netfilter/Kconfig` + `net/ipv4/netfilter/Kconfig` + `net/ipv6/netfilter/Kconfig`
+核对，**仅 1 处修正**：`CONFIG_NF_CONNTRACK_NETLINK` 不存在 →
+改为 `CONFIG_NF_CT_NETLINK`（并补 `NF_CT_NETLINK_TIMEOUT`）。
+`xt_qtaguid` / `xt_quota2` 是 Android 特有、主线内核没有，netd 只报 W 级，不列入。
+
+覆盖四组：表（`IP_NF_RAW` / `IP6_NF_RAW` / `IP6_NF_NAT` / `*_SECURITY` / `*_TARGET_REJECT`）、
+NFLOG/netlink（`NETFILTER_NETLINK_LOG/QUEUE/ACCT/OSF`、`NF_CT_NETLINK`、
+`XT_TARGET_NFLOG/NFQUEUE`、`NF_LOG_IPV4/ARP`）、xt targets、xt matches。
+
+### 25.3 关键约束（写进脚本注释）
+
+1. **必须保留 DUMB 放行补丁**：当前运行内核是本地自造 `9d487b152f59`
+   （§3.1 第 3 条），改 `drivers/gpu/drm/drm_ioctl.c` 三行
+   `DRM_IOCTL_DEF(..., 0)` → `DRM_RENDER_ALLOW`；pinned 官方源码里这三行仍是 `0`。
+   不打会让刚修好的 SF/图形栈倒退。
+2. **必须带上原 `waydroid.config` 最小集**：`ANDROID_BINDER_IPC=y`、
+   `ANDROID_BINDERFS=y`、`NETFILTER_XTABLES_LEGACY=y`、
+   `IP_NF_IPTABLES_LEGACY/FILTER/NAT`、`NF_NAT`、
+   `XT_TARGET_MASQUERADE/CHECKSUM`（否则 binderfs 与 waydroid-net.sh 失效）。
+3. **`NETFILTER_NETLINK` 是 `bool` 内建符号**：`NETFILTER_NETLINK_LOG`、`NF_CT_NETLINK`
+   会 `select` 它成 `=y` → 必须完整重编 **Image** 并替换内核，
+   「只 insmod 几个 .ko、不换 Image」不成立（虽然当前内核
+   `CONFIG_MODVERSIONS is not set`，vermagic 只校验字符串）。
+4. `JOBS=6` 防 OOM；已有 4 个旧内核 + `/usr/sbin/erhai-switch` 可回退。
+
+### 25.4 生成的脚本（`<工作区>/rebuild-netfilter-kernel.sh`，`bash -n` 通过，未执行）
+
+七步：克隆内核源码并 checkout pinned commit → 打 DUMB 补丁并提交 →
+合并生成完整 `kernel/waydroid.config` → 把 fragment 挂进
+`tools/build-kernel.sh` → `prepare-inputs.py` →
+`OUT_DIR=… JOBS=6 ALLOW_UNPINNED_KERNEL=1 tools/build-kernel.sh` →
+`build-initramfs.sh` + `build-erhai-abl-symbols.py` + `build-debs.py --only erhai-kernel`。
+
+路径已核对：`prepare-inputs.py` 的 stock 目标是 `cache/stock-c34/images`
+（`vendor_boot.img` / `dtbo.img` 齐全），`PROFILE=ncm` 产物为
+`initramfs-ncm.cpio.gz`，与手册 §7 一致。
+
+**脚本不写启动槽**，最后一步需在平板终端执行：
+```bash
+sudo apt-get install -y --allow-downgrades <工作区>/onepluspad-2pro-mainline/out/kernel-deb/erhai-kernel*.deb
+```
+回退：`sudo /usr/sbin/erhai-switch status|verify|to-<旧槽>`。
+
+### 25.5 分工与待确认
+
+- 我可全自动：克隆、打补丁、生成配置、编译、打包（都在工作区，不碰系统）。
+- 用户只需：最后一条 `sudo apt-get install`（写启动槽，即「登录账号」）。
+- **待用户一句确认后开编**（预计 30–90 分钟）；期间不动容器、不改属性/启动槽。
+- 本轮容器保持 STOPPED，未编译、未 modprobe、未改内核。
