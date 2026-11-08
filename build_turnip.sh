@@ -46,7 +46,11 @@ prepare_workdir() {
             [ "$(sha256sum "$tb" | cut -d' ' -f1)" = "$MESA_TARBALL_SHA256" ] || die "Mesa tarball checksum mismatch"
         fi
         local top
-        top="$(tar tJf "$tb" | head -1 | cut -d/ -f1)"
+        # Under `set -o pipefail`, `tar tJf | head -1` closes the pipe early and
+        # makes tar fail with "tar: stdout: write error" (SIGPIPE) on the large
+        # Mesa tarball. Let awk consume the whole listing and keep only line 1.
+        top="$(tar tJf "$tb" | awk 'NR==1 { split($0, p, "/"); print p[1] }')"
+        [ -n "$top" ] || die "Could not determine Mesa tarball top directory"
         tar xJf "$tb" -C "$WORKDIR"
         mv "$WORKDIR/$top" "$WORKDIR/mesa"
         git -C "$WORKDIR/mesa" init -q
