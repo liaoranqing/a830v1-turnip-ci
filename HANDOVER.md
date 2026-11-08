@@ -1147,3 +1147,60 @@ sudo apt-get install -y --allow-downgrades <工作区>/onepluspad-2pro-mainline/
 - 用户只需：最后一条 `sudo apt-get install`（写启动槽，即「登录账号」）。
 - **待用户一句确认后开编**（预计 30–90 分钟）；期间不动容器、不改属性/启动槽。
 - 本轮容器保持 STOPPED，未编译、未 modprobe、未改内核。
+
+## 26. 内核重编成功，deb 产物已验证（2026-11-08 22:12）
+
+### 26.1 第 4 次失败与第 5 次成功
+
+- 第 4 次（`WIJHXe`）：逐文件编译全部完成（`LD vmlinux.o`、`MODPOST Module.symvers`），
+  但在最后链接 / `.mod.o` / kallsyms 阶段报
+  `fatal error: error closing /tmp/ccXXXX.s: 设备上没有空间` → `REBUILD_EXIT=2`。
+  **根因：`/tmp` 是 10 MB tmpfs**（`df -h` 实测），而 `/home` 有 179 GB。
+- 修复：脚本开头 `export TMPDIR="$REPO/tmp"`（并 `mkdir -p`），把 GCC 临时文件
+  挪到 `/home` 分区。Kbuild 增量复用已编译的 6,700+ 对象、`vmlinux.o`、
+  `Module.symvers`，第 5 次（`yq8vyI`）**2 分 10 秒**完成，`REBUILD_EXIT=0`。
+
+### 26.2 产物
+
+| 项 | 值 |
+|---|---|
+| 主包 | `out/kernel-deb/erhai-kernel-image-7.2.15-erhai-dev-g59273d8f058b-a326ab771_0.7.2+g59273d8f058b.b34d5f0dc_arm64.deb`（52 MB） |
+| 元包 | `out/kernel-deb/erhai-kernel_0.7.2+g59273d8f058b.b34d5f0dc_arm64.deb`（1.4 KB） |
+| 内核 release | `7.2.15-erhai-dev-g59273d8f058b-a326ab771` |
+| 模块总数 | 1,328（build-result.json） |
+| 编译器 | `aarch64-linux-gnu-gcc (Ubuntu 15.2.0)`（与 pin 的 13.3.0 不同，但未触发任何 warning/error） |
+
+### 26.3 产物验证（关键，全部通过）
+
+- `dpkg -c` 实测 deb 内含此前**全部缺失**的模块：
+  `iptable_raw.ko`、`ip6table_raw.ko`、`ip6table_nat.ko`、`ip6table_filter.ko`、
+  `ip6table_mangle.ko`、`nfnetlink_log.ko`、`nfnetlink_queue.ko`、
+  `xt_NFLOG.ko`、`xt_owner.ko`、`xt_quota.ko`。
+- `out/kernel/.config` 实测：`CONFIG_IP_NF_RAW/IP6_NF_RAW/IP6_NF_NAT/
+  NETFILTER_NETLINK_LOG/NETFILTER_XT_TARGET_NFLOG/NETFILTER_XT_MATCH_OWNER=m`，
+  `NETFILTER_XTABLES_LEGACY=y`、`ANDROID_BINDERFS=y`、`IP_NF_IPTABLES_LEGACY=m` 全部生效。
+- DUMB 补丁保留：`drm_ioctl.c:708` 为 `DRM_RENDER_ALLOW`。
+- 63 项 fragment 全数通过 `build-kernel.sh` 的逐项校验；0 error / 0 warning。
+
+### 26.4 安装的真实影响（务必看清）
+
+- **image 包**的 postinst 只有 `depmod -a`，仅安装模块树与签名 boot 三件套到
+  `/usr/lib/erhai/boot/<release>/`，**不写启动槽**。控制信息原文：
+  "it does not select a boot image or write boot partitions"。
+- **元包 `erhai-kernel`** 的 postinst 会调用
+  `/usr/sbin/erhai-switch-install-ubuntu-images "$IMAGES"`：在已启动的 Ubuntu
+  系统上**就地重写启动分区**（不自动重启，由用户决定何时重启），并把旧的
+  boot 三件套保留到 `/var/lib/erhai/switch/ubuntu.prev/` 供回退。
+- → `apt-get install erhai-kernel*.deb`（两包一起装）**会写启动槽**，
+  按工作约定必须取得用户明确同意。
+- 回退能力：已安装 **5 个** `erhai-kernel-image-*` 旧内核；当前槽 `_a` /
+  `installed: ubuntu`；`erhai-switch` 与 `ubuntu.prev` 均可回滚。
+
+### 26.5 待用户决策
+
+选项：① 两包一起装（写启动槽、不重启，之后自行重启验证）；
+② 只 `dpkg -i erhai-kernel-image-*.deb`（不装元包、不写槽，先看文件）；
+③ 暂不安装。
+
+**装完并重启后仍需重跑 P0 验证**（`sys.boot_completed` 是否为 1），
+才能确认 netd 问题真正解决。本轮容器保持 STOPPED，未安装、未写启动槽。
