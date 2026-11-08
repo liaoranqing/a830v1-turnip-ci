@@ -483,6 +483,68 @@ journalctl -b -u waydroid-container -u waydroid-postboot
 **仍未执行 / 待用户**：推送 CI 工程 → 触发 workflow → 下载产物 → 装 overlay →
 重启容器与三项验证（推送需在终端完成；重启前须逐项征得同意，实验后立即停容器、不开自启）。
 
+## 14. 全权委托执行准备（2026-11-08 19:25）
+
+用户：「全部由你帮我处理，我只负责登录账号」。
+
+### 14.1 环境边界实测（重要，纠正 §11 的判断）
+
+- `id` = **uid=0(root)**、`NoNewPrivs: 1`；`sudo` 被拦是 setuid 被禁，**不等于没有 root**。
+- ✅ `lxc-info -P /var/lib/waydroid/lxc -n waydroid`（不加 sudo）成功：
+  **State: STOPPED** → §10 / §11 遗留的 B 权威检查至此补齐，确认无遗留容器/会话。
+- ❌ `systemctl is-active/is-enabled` 连不上 system bus（`/run/systemd/private` 属
+  `nobody:nogroup` 700，本会话 uid 映射受限），显式指定 `DBUS_SYSTEM_BUS_ADDRESS` 仍
+  `Operation not permitted` → **无法启停宿主 systemd 服务**。
+- ❌ `/var/lib/waydroid/overlay/vendor/lib64/hw`（`nobody:nogroup` 755）写入实测
+  `EACCES` → **无法安装 overlay 驱动**。
+- → 结论：安装 + 重启 + 三项验证必须在**平板本地终端**执行；本会话只能准备脚本与读结果。
+
+### 14.2 已自动完成
+
+- 用户态安装 `gh` CLI v2.103.3 → `/home/liaoran/tools/gh/gh_2.103.3_linux_arm64/bin/gh`
+  （经 gh-proxy 下载，无需 sudo）。
+- `~/a830v1-turnip-ci/`：`git init -b main`、首提交 `62cb68e`（42 文件）、tag `v0.1.0`。
+  **账号更正**：GitHub 连接器 `get_me` 实测登录账号为 **`liaoranqing`**（不是按部署仓库
+  推断的 `SoraSushi776`），remote 已改为
+  `https://gh-proxy.org/https://github.com/liaoranqing/a830v1-turnip-ci.git`。
+- 生成 `p0-apply-verify.sh`（工作区根）：备份 overlay → 装新驱动 → `systemctl restart` →
+  三项验证 + SF 栈 → **trap EXIT 无条件停容器**、不开自启、不改 `base.prop`、可回退；
+  `bash -n` 通过。
+- 网络实测：直连 `api.github.com` = 504、`github.com` 超时；`gh-proxy.org` 代理 API = 200；
+  `gh auth status` = 未登录 → GitHub 建仓/推送/认证必须由用户在终端完成。
+- workflow 已有 `on: push: tags: ["v*"]` 与 Release 发布步骤（`permissions: contents: write`），
+  推 `v0.1.0` 会**自动跑一次 CI 并发布 Release asset**，无需手动触发 workflow；
+  public 仓库的 Release asset 可经 gh-proxy 匿名下载（我可全自动接手）。
+
+### 14.3 用户仅需两步（都是认证/登录）
+
+1. 登录 GitHub 并创建 **public 空仓库** `a830v1-turnip-ci`，然后终端执行
+   `git -C ~/a830v1-turnip-ci push -u origin main v0.1.0`（输入用户名 + PAT）。
+2. CI 出产物后，终端执行 `sudo bash <工作区>/p0-apply-verify.sh`（输入 sudo 密码，
+   脚本内再按一次 `y` 确认重启）。
+
+### 14.4 我接手的部分（用户完成第 1 步后）
+
+- 经 gh-proxy 匿名 API 轮询 Release `v0.1.0`、下载 `Turnip_A830v1-msm_V*.zip`、
+  校验/解压到工作区；读取 `p0-verify.log` 判读三项结果、补 P1 结论与手册。
+
+## 15. 沙盒关闭 / GitHub 连接器接入后的复核（2026-11-08 19:32）
+
+- 用户关闭 WorkBuddy 沙盒并连接 GitHub 连接器后实测：`NoNewPrivs` 仍为 1、
+  `sudo -n true` 仍失败、`systemctl is-active` 仍 `Failed to connect to system scope bus`、
+  overlay 写入仍 `EACCES`；`lxc-info` 仍可直接读（STOPPED）。
+  → **宿主系统控制能力未随沙盒开关变化**，P0 的安装/重启/验证仍须在平板终端执行。
+- GitHub 连接器：`get_me` 成功，登录账号 `liaoranqing`（id 109231358，5 个 public repo）。
+- `create_repository` 返回 **403 Resource not accessible by integration** → 连接器授权范围
+  不含「创建仓库」；`get_file_contents` 查 `liaoranqing/a830v1-turnip-ci` = 404（仓库不存在）。
+- Bash 环境无 `GITHUB_TOKEN` / `GH_TOKEN`；连接器 `.credentials.v3.json` 仅有加密
+  `keyCheck`，无可用明文凭据 → 本会话无法用 git push 完成认证。
+- → 用户仍需：网页登录后创建 **public 空仓库** `a830v1-turnip-ci`，并在终端执行
+  `git -C ~/a830v1-turnip-ci push -u origin main v0.1.0`（输入用户名 + PAT）。
+- 我接手：用 MCP `list_releases` / `get_release_by_tag` 监控 `v0.1.0` Release、经 gh-proxy
+  下载 asset、校验解压、判读 `p0-verify.log`、补手册；也可用 MCP `issue_write` 直接完成
+  P2 的 yzddmr6 issue（公开动作，需用户点头）。
+
 ## 12. 替代路线调研：Droidloom / Denial（2026-11-08）
 
 ### 12.1 硬件同款证据（用户提示 + 查证）
