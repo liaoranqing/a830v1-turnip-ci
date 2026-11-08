@@ -698,3 +698,39 @@ journalctl -b -u waydroid-container -u waydroid-postboot
   `https://gh-proxy.org/https://github.com/denialwm/droidloom/releases/latest` 返回 200。
 - → 落地原则：**GitHub 类资源统一加 `https://gh-proxy.org/` 前缀或改用
   `gcore.jsdelivr.net/gh/...`；CI 主链路其余源保持原样**（对境外 runner 换国内源是负优化）。
+
+## 19. 第三轮失败（Meson 版本）与第四轮（2026-11-08 20:0x）
+
+- run `42478349538`（tag `v0.1.3`）`completed/failure`，73 秒，仍失败在 `Build Turnip`，
+  但已推进到构建配置阶段：6 个补丁全部应用、`libdrm: prepared at …/deps` 成功
+  （§18 的 `debugfs` 修复有效）。
+- 失败原文：`meson.build:9:18: ERROR: Meson version is 1.3.2 but project requires >= 1.4.0`。
+  根因：`ubuntu-24.04` apt 的 meson 是 1.3.2，而 Mesa 26.2.3 的
+  `project(... meson_version : '>= 1.4.0')`（§6 未预见的第 4 个失败点）。
+- **本地预验证（避免再空跑一轮）**：
+  - 在 4 个 venv 分别装 `meson 1.4.1 / 1.7.2 / 1.9.1 / 1.12.1` + ninja，
+    用最小探针复刻 Mesa 26.2.3 的 `default_options`（含 `rust_std=2021` /
+    `build.rust_std=2021`）→ **四个版本全部 PASS**。
+  - 再用完整 CI 参数集（`-Dplatforms=android -Dvideo-codecs= -Dgallium-drivers=
+    -Dplatform-sdk-version=36 -Degl=disabled -Dandroid-libbacktrace=disabled` 等）
+    跑配置探针 → `meson 1.9.1` **exit 0**，确认空 array 值合法。
+  - 从 `meson.options` 复核：`platform-sdk-version` 是 integer（min 25 / max 10000）、
+    `egl` / `android-libbacktrace` 是 feature（`disabled` 合法）、其余 array 的
+    choices 均包含所传值；113 个 option 里脚本用到的全部存在。
+  - `python3 -m mesonbuild.mesonmain --version` 实测可用（绕过 PATH 里旧的
+    `/usr/bin/meson`）。
+- **修复（已推送 v0.1.4 / commit `4ec145f`）**：
+  - `.github/workflows/build.yml`：`pip install --break-system-packages "meson==1.9.1" mako`
+    （替换原来只装 mako 的一行），并在安装后打印模块版本。
+  - `build_turnip.sh::check_deps()`：新增版本检测（`importlib.metadata` 比较 ≥1.4），
+    不满足则 pip 自愈安装 `meson==1.9.1`，失败即 die；`build_android()` 的
+    `meson setup` 改为 `python3 -m mesonbuild.mesonmain setup`，彻底绕开 PATH 顺序问题。
+  - `bash -n` 通过；版本检测片段与模块调用形式均本地实跑验证。
+- 第四轮：run **`42479527201`**（tag `v0.1.4`，`in_progress`）；推送时直连 TLS 抖动
+  重试 3 次（CONNECT 502），第 4 次成功。已挂 120 分钟后台监控，
+  Release asset 出现后自动下载 `Turnip_A830v1-msm_V*.zip` 到工作区根。
+- 注意：前三轮都是 **1 分钟内的早期失败**（尚未进入编译）；第四轮若过了配置阶段，
+  将进入 NDK + Mesa 实际编译，预计 40–70 分钟，期间不要再改构建脚本。
+- 产物落地后仍需用户在平板终端执行
+  `sudo bash <工作区>/p0-apply-verify.sh`（重启前脚本会再确认一次）；
+  本会话仍未启动容器、未改属性/内核/启动槽。
