@@ -930,3 +930,78 @@ sudo bash /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-apply-verify.sh
 logcat / getprop / ps 定位是启动慢还是 system_server 重启，再按 §6-P1 处理。
 
 本轮**只读判读 + 改脚本**，容器保持 STOPPED，未改属性/内核/启动槽。
+
+## 23. 第三次 P0：boot 卡点精确定位为 netd（与图形栈无关）（2026-11-08 20:47）
+
+### 23.1 结果（20:43 那轮，等满 240 秒）
+
+`P0_RESULT_CONTAINER=UP`、`P0_RESULT_VKJSON_BYTES=1465`、
+`P0_RESULT_GLES` 仍为 830v1 + turnip 26.2.3、`P0_RESULT_BOOT=0`、
+`P0_RESULT_BOOT_WAIT_SECS=240`、`P0_RESULT_SYSTEM_SERVER=UP`、
+`P0_RESULT_WATCHDOG_HITS=182`、`P0_RESULT_LOGCAT_BYTES=2533346`。
+全量诊断已落 `p0-diag/`（2.7 MiB）。容器最终 STOPPED。
+
+### 23.2 精确根因（Watchdog 栈，来自 `logcat-keys.txt`）
+
+```
+12:44:19 Watchdog: WAITED_HALF
+12:44:20 ActivityManager: Dumping to /data/anr/anr_2026-11-08-12-44-20-138
+12:45:01 Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS:
+         Blocked in handler on main thread (main)
+    at com.android.server.NetworkManagementService$Dependencies.getNetd(NetworkManagementService.java:123)
+    at com.android.server.NetworkManagementService.connectNativeNetdService(...:427)
+    at com.android.server.NetworkManagementService.create(...:260)
+    at com.android.server.SystemServer.startOtherServices(SystemServer.java:1907)
+```
+`system_server` 主线程卡在**等待 netd 的 binder 服务**，60 秒 Watchdog 超时后
+被杀并重启。证据链：主 PID **234 → 1310 → 2351**（每约 100 秒一轮）、
+每轮都停在 `OnBootPhase_200` 之后 `StorageManagerService mBootCompleted=false`、
+`init.svc.bootanim=running`、`dev.bootcomplete=` 始终为空。
+第二次 KILL 在 12:46:43，与 PID 2310 轮次一致。
+
+### 23.3 结论：P0 的核心目标已达成，boot 是独立遗留问题
+
+- 图形侧三项已验证有效：容器 UP、vkjson 正常、**GLES 识别
+  `Adreno (TM) 830v1` + `turnip Mesa 26.2.3`**、SF/RenderEngine 栈正常空闲。
+- boot 卡点是 **netd / NetworkManagementService**，属于 Android 网络服务，
+  与 Turnip、ANGLE、msm DRM、830v1 补丁**完全无关**。
+- 手册 §2.2 早就记录「system_server 被 Watchdog 反复杀死，
+  sys.boot_completed 永远不为 1」→ 这个 netd 问题**实验前就存在**，
+  只是此前被归因于 SF 图形死锁；新驱动修好了图形死锁，才让它显露出来。
+- → **不应据此否定 CI 产物**；P0 对「驱动有效性」的验证已完成。
+
+### 23.4 环境核对（排除网络相关内核缺件）
+
+| 项 | 结果 |
+|---|---|
+| 宿主内核 | `ip_tables / iptable_filter / iptable_nat / iptable_mangle / xt_MASQUERADE / nf_nat / nf_conntrack / xt_CHECKSUM` 全部已加载（§1 编入的 legacy iptables/NAT 生效） |
+| `nf_tables` | **未加载**（`iptables -V` 因此报 `Failed to initialize nft`） |
+| `iptables-legacy` | `/usr/sbin/iptables-legacy` v1.8.11 (legacy) 可用 |
+| `waydroid-net.sh` | `LXC_USE_NFT="false"`，`IPTABLES_BIN=iptables-legacy` → 后端正确 |
+| binder 节点 | `config_nodes` 已 bind 挂载 `/dev/binder`、`/dev/vndbinder`、`/dev/hwbinder`、`/dev/net/tun` |
+| 容器网络 | `lxc.net.0.type=veth`、`link=waydroid0`、`flags=up`，lxc-info 有 TX/RX 字节 |
+
+→ 常见社区解法（`LXC_USE_NFT=false`、装 iptables-legacy、补内核模块）
+在本机**都已满足**，netd 卡住需从容器内 `ps / getprop / logcat` 确认
+netd 进程是否启动、是否因缺 `xt_owner/xt_qtaguid` 等模块或 binder 注册失败。
+
+### 23.5 权限障碍与待用户一条命令
+
+`p0-diag/` 内除 `logcat-keys.txt` 外均为 **600 root**（脚本在 sudo 下
+umask 0077 生成），本会话因 namespace 隔离读不了、也无法自行 chmod。
+**不需要重启容器**，只需：
+
+```bash
+sudo chmod 644 /home/liaoran/WorkBuddy/2026-11-08-18-35-13/p0-diag/*
+```
+
+我即可读全量 `logcat.txt` / `ps.txt` / `getprop.txt` / `activity.txt`，
+确认 `init.svc.netd`、`pidof netd` 与 netd 崩溃原因，再给出针对性修复。
+
+### 23.6 脚本预防性改进（`bash -n` 通过）
+
+- 诊断段落加 `umask 022`，避免以后再生成 600 文件；
+- boot 进度新增打印 `init.svc.netd` 与 `pidof netd`；
+- 自动把最近 15 分钟的 `/data/anr/anr_*` 复制到 `p0-diag/anr/` 便于离线分析。
+
+本轮**只读判读 + 改脚本**，容器保持 STOPPED，未改属性/内核/启动槽。
